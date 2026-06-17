@@ -9,8 +9,6 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    outputs:
-      job_status: ${{ job.status }}
 
     steps:
       - name: Checkout code
@@ -48,31 +46,9 @@ jobs:
           docker build -t sample-app:${{ github.sha }} ./sample-app 2>&1 | tee docker-output.txt
         continue-on-error: true
 
-      - name: Upload logs as artifacts
-        uses: actions/upload-artifact@v4
+      - name: Combine all logs
         if: always()
-        with:
-          name: pipeline-logs
-          path: |
-            lint-output.txt
-            test-output.txt
-            docker-output.txt
-
-      - name: Collect failure context
-        if: always()
-        id: collect-context
         run: |
-          INSTALL_STATUS="${{ steps.install.outcome }}"
-          LINT_STATUS="${{ steps.lint.outcome }}"
-          TEST_STATUS="${{ steps.test.outcome }}"
-          DOCKER_STATUS="${{ steps.docker.outcome }}"
-
-          echo "install_status=$INSTALL_STATUS" >> $GITHUB_OUTPUT
-          echo "lint_status=$LINT_STATUS" >> $GITHUB_OUTPUT
-          echo "test_status=$TEST_STATUS" >> $GITHUB_OUTPUT
-          echo "docker_status=$DOCKER_STATUS" >> $GITHUB_OUTPUT
-
-          # Combine all logs for the agent
           echo "=== INSTALL LOGS ===" > combined-logs.txt
           cat lint-output.txt >> combined-logs.txt 2>/dev/null || echo "No install logs" >> combined-logs.txt
           echo "=== LINT LOGS ===" >> combined-logs.txt
@@ -109,7 +85,7 @@ jobs:
 
       - name: Install agent dependencies
         run: |
-          pip install anthropic requests PyGithub
+          pip install anthropic requests
 
       - name: Download pipeline logs
         uses: actions/download-artifact@v4
@@ -119,12 +95,13 @@ jobs:
 
       - name: Run Self-Healing Agent
         env:
+          AI_PROVIDER: ${{ secrets.AI_PROVIDER }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO_NAME: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
-          INSTALL_STATUS: ${{ needs.build-and-test.outputs.job_status }}
           RUN_ID: ${{ github.run_id }}
         run: |
           python agent/self_healing_agent.py
