@@ -150,10 +150,18 @@ Respond in valid JSON only. No markdown, no explanation outside the JSON."""
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
     }
 
-    response = requests.post(url, json=payload, timeout=30)
+    response = requests.post(url, json=payload, timeout=60)
     response.raise_for_status()
     data = response.json()
-    raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+
+    # Debug: print full raw response
+    print(f"📨 Gemini raw response keys: {list(data.keys())}")
+    candidate = data.get("candidates", [{}])[0]
+    print(f"📨 Finish reason: {candidate.get('finishReason', 'unknown')}")
+    raw_text = candidate.get("content", {}).get("parts", [{}])[0].get("text", "")
+    print(f"📨 Raw response length: {len(raw_text)} chars")
+    print(f"📨 Raw response preview: {raw_text[:500]}")
+
     return parse_ai_response(raw_text)
 
 
