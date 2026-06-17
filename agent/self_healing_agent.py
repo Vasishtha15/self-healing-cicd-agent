@@ -87,12 +87,19 @@ def classify_failures(logs: str) -> dict:
 
 def parse_ai_response(raw_text: str) -> dict:
     text = raw_text.strip()
+    # Strip markdown fences
     if text.startswith("```"):
         parts = text.split("```")
         text = parts[1] if len(parts) > 1 else text
         if text.startswith("json"):
             text = text[4:]
-    return json.loads(text.strip())
+    text = text.strip()
+    # Find JSON boundaries in case of extra text
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start != -1 and end > start:
+        text = text[start:end]
+    return json.loads(text)
 
 
 def analyse_with_claude(logs: str, failure_context: dict) -> dict:
@@ -140,7 +147,7 @@ Respond in valid JSON only. No markdown, no explanation outside the JSON."""
 
     payload = {
         "contents": [{"parts": [{"text": combined_prompt}]}],
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500}
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
     }
 
     response = requests.post(url, json=payload, timeout=30)
