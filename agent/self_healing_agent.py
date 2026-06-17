@@ -1,13 +1,19 @@
 """
 Self-Healing CI/CD Pipeline Agent
 ----------------------------------
-Uses Anthropic Claude to analyse pipeline failures across:
+Analyses pipeline failures across:
 - Dependency installation errors
-- Lint failures
-- Test failures
+- Lint failures (flake8)
+- Test failures (pytest)
 - Docker build failures
 
-Posts a structured diagnosis + fix suggestion as a PR comment.
+Supports multiple AI providers:
+- Anthropic Claude (production)
+- Google Gemini (free tier / testing)
+
+Configure via AI_PROVIDER environment variable: "claude" or "gemini"
+
+Posts structured diagnosis + fix suggestions as a PR comment.
 Author: Ayushi Vasishtha
 """
 
@@ -15,10 +21,12 @@ import os
 import sys
 import json
 import requests
-from anthropic import Anthropic
+from typing import Optional
 
 # ── Config ────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY")
+AI_PROVIDER       = os.environ.get("AI_PROVIDER", "claude").lower()
 GITHUB_TOKEN      = os.environ.get("GITHUB_TOKEN")
 REPO_NAME         = os.environ.get("REPO_NAME")
 PR_NUMBER         = os.environ.get("PR_NUMBER")
@@ -26,44 +34,7 @@ COMMIT_SHA        = os.environ.get("COMMIT_SHA", "unknown")
 RUN_ID            = os.environ.get("RUN_ID", "unknown")
 LOG_FILE          = "combined-logs.txt"
 
-client = Anthropic(api_key=ANTHROPIC_API_KEY)
-
-
-def read_logs() -> str:
-    """Read combined pipeline logs from file."""
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r") as f:
-            content = f.read()
-        # Truncate to avoid exceeding context — keep last 8000 chars (most relevant)
-        if len(content) > 8000:
-            content = "...[truncated]...\n" + content[-8000:]
-        return content
-    return "No log file found — pipeline may have failed before log collection."
-
-
-def classify_failures(logs: str) -> dict:
-    """
-    Quick heuristic classification before sending to Claude.
-    Helps Claude focus on the right failure category.
-    """
-    failures = {
-        "install":  any(kw in logs.lower() for kw in ["no module named", "pip", "could not find", "requirement"]),
-        "lint":     any(kw in logs.lower() for kw in ["e1", "e2", "e3", "w1", "flake8", "pylint", "undefined name"]),
-        "test":     any(kw in logs.lower() for kw in ["failed", "error", "assert", "pytest", "test_"]),
-        "docker":   any(kw in logs.lower() for kw in ["dockerfile", "docker", "build failed", "step", "runc"]),
-    }
-    detected = [k for k, v in failures.items() if v]
-    return {"detected": detected, "raw": failures}
-
-
-def analyse_with_claude(logs: str, failure_context: dict) -> dict:
-    """
-    Send logs to Claude for deep analysis.
-    Returns structured diagnosis and fix suggestions.
-    """
-    detected_types = ", ".join(failure_context["detected"]) if failure_context["detected"] else "unknown"
-
-    system_prompt = """You are an expert DevOps engineer and CI/CD specialist.
+SYSTEM_PROMPT = """You are an expert DevOps engineer and CI/CD specialist.
 Your job is to analyse pipeline failure logs and provide:
 1. A clear root cause diagnosis
 2. Specific, actionable fix suggestions with code examples where possible
@@ -92,53 +63,112 @@ Always respond in valid JSON with this exact structure:
   "confidence": "high|medium|low"
 }"""
 
-    user_message = f"""Pipeline failure detected. Failure types identified by heuristics: {detected_types}
 
-Pipeline logs:
-{logs}
+def read_logs() -> str:
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r") as f:
+            content = f.read()
+        if len(content) > 8000:
+            content = "...[truncated]...\n" + content[-8000:]
+        return content
+    return "No log file found — pipeline may have failed before log collection."
 
-Analyse these logs and provide your diagnosis and fix suggestions in the required JSON format."""
 
-    print(f"🤖 Sending logs to Claude for analysis (detected: {detected_types})...")
+def classify_failures(logs: str) -> dict:
+    failures = {
+        "install": any(kw in logs.lower() for kw in ["no module named", "pip", "could not find", "requirement"]),
+        "lint":    any(kw in logs.lower() for kw in ["e1", "e2", "e3", "w1", "flake8", "pylint", "undefined name"]),
+        "test":    any(kw in logs.lower() for kw in ["failed", "error", "assert", "pytest", "test_"]),
+        "docker":  any(kw in logs.lower() for kw in ["dockerfile", "docker", "build failed", "step", "runc"]),
+    }
+    detected = [k for k, v in failures.items() if v]
+    return {"detected": detected, "raw": failures}
+
+
+def parse_ai_response(raw_text: str) -> dict:
+    text = raw_text.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        text = parts[1] if len(parts) > 1 else text
+        if text.startswith("json"):
+            text = text[4:]
+    return json.loads(text.strip())
+
+
+def analyse_with_claude(logs: str, failure_context: dict) -> dict:
+    try:
+        from anthropic import Anthropic
+    except ImportError:
+        raise RuntimeError("anthropic package not installed. Run: pip install anthropic")
+
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError("ANTHROPIC_API_KEY environment variable not set.")
+
+    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    detected_types = ", ".join(failure_context["detected"]) or "unknown"
+    print(f"🤖 Sending logs to Anthropic Claude (detected: {detected_types})...")
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1500,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}]
+        system=SYSTEM_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": f"Pipeline failure detected. Failure types: {detected_types}\n\nLogs:\n{logs}\n\nRespond in JSON only."
+        }]
     )
+    return parse_ai_response(response.content[0].text)
 
-    raw_text = response.content[0].text.strip()
 
-    # Strip markdown fences if Claude wrapped in ```json
-    if raw_text.startswith("```"):
-        raw_text = raw_text.split("```")[1]
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
-    raw_text = raw_text.strip()
+def analyse_with_gemini(logs: str, failure_context: dict) -> dict:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY environment variable not set.")
 
-    return json.loads(raw_text)
+    detected_types = ", ".join(failure_context["detected"]) or "unknown"
+    print(f"🤖 Sending logs to Google Gemini (detected: {detected_types})...")
+
+    combined_prompt = f"""{SYSTEM_PROMPT}
+
+Pipeline failure detected. Failure types identified: {detected_types}
+
+Pipeline logs:
+{logs}
+
+Respond in valid JSON only. No markdown, no explanation outside the JSON."""
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+
+    payload = {
+        "contents": [{"parts": [{"text": combined_prompt}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1500}
+    }
+
+    response = requests.post(url, json=payload, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+    return parse_ai_response(raw_text)
+
+
+def analyse_with_ai(logs: str, failure_context: dict) -> dict:
+    print(f"🔧 AI Provider: {AI_PROVIDER.upper()}")
+    if AI_PROVIDER == "gemini":
+        return analyse_with_gemini(logs, failure_context)
+    elif AI_PROVIDER == "claude":
+        return analyse_with_claude(logs, failure_context)
+    else:
+        raise ValueError(f"Unknown AI_PROVIDER: '{AI_PROVIDER}'. Use 'claude' or 'gemini'.")
 
 
 def format_pr_comment(analysis: dict, commit_sha: str, run_id: str, repo: str) -> str:
-    """Format Claude's analysis into a clean, readable PR comment."""
+    severity_emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(
+        analysis.get("severity", "high"), "🟠")
+    confidence_emoji = {"high": "✅", "medium": "⚠️", "low": "❓"}.get(
+        analysis.get("confidence", "medium"), "⚠️")
 
-    severity_emoji = {
-        "critical": "🔴",
-        "high":     "🟠",
-        "medium":   "🟡",
-        "low":      "🟢"
-    }.get(analysis.get("severity", "high"), "🟠")
-
-    confidence_emoji = {
-        "high":   "✅",
-        "medium": "⚠️",
-        "low":    "❓"
-    }.get(analysis.get("confidence", "medium"), "⚠️")
-
-    failure_badges = " ".join([
-        f"`{ft}`" for ft in analysis.get("failure_types", ["unknown"])
-    ])
+    provider_label = "Anthropic Claude Sonnet" if AI_PROVIDER == "claude" else "Google Gemini 1.5 Flash"
+    provider_badge = "🟣" if AI_PROVIDER == "claude" else "🔵"
+    failure_badges = " ".join([f"`{ft}`" for ft in analysis.get("failure_types", ["unknown"])])
 
     fixes_md = ""
     for i, fix in enumerate(analysis.get("fixes", []), 1):
@@ -149,9 +179,9 @@ def format_pr_comment(analysis: dict, commit_sha: str, run_id: str, repo: str) -
 
     run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
 
-    comment = f"""## 🤖 Self-Healing CI/CD Agent — Pipeline Analysis
+    return f"""## 🤖 Self-Healing CI/CD Agent — Pipeline Analysis
 
-> **Commit:** `{commit_sha[:8]}` | **Severity:** {severity_emoji} `{analysis.get('severity', 'unknown').upper()}` | **Confidence:** {confidence_emoji} `{analysis.get('confidence', 'medium')}`
+> **Commit:** `{commit_sha[:8]}` | **Severity:** {severity_emoji} `{analysis.get('severity', 'unknown').upper()}` | **Confidence:** {confidence_emoji} `{analysis.get('confidence', 'medium')}` | **AI:** {provider_badge} `{provider_label}`
 
 ---
 
@@ -180,22 +210,18 @@ def format_pr_comment(analysis: dict, commit_sha: str, run_id: str, repo: str) -
 
 - **Run ID:** [{run_id}]({run_url})
 - **Commit:** `{commit_sha}`
-- **Agent Model:** claude-sonnet-4-6
-- **Analysis powered by:** [Anthropic Claude](https://www.anthropic.com)
+- **AI Provider:** {provider_label}
+- **Configured via:** `AI_PROVIDER` environment variable
 
 </details>
 
 ---
-*🤖 This analysis was generated automatically by the [Self-Healing CI/CD Agent](https://github.com/{repo}). Review suggestions carefully before applying.*"""
-
-    return comment
+*🤖 Generated by [Self-Healing CI/CD Agent](https://github.com/{repo}). Supports Anthropic Claude & Google Gemini.*"""
 
 
 def post_pr_comment(comment: str) -> bool:
-    """Post the analysis comment to the GitHub PR."""
     if not PR_NUMBER or PR_NUMBER == "None":
-        print("⚠️  No PR number found — this is a direct push, not a PR. Skipping PR comment.")
-        print("\n📋 Analysis (would have been posted as PR comment):")
+        print("⚠️  No PR number — direct push. Printing analysis:")
         print(comment)
         return False
 
@@ -204,7 +230,6 @@ def post_pr_comment(comment: str) -> bool:
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
     }
-
     response = requests.post(url, headers=headers, json={"body": comment})
 
     if response.status_code == 201:
@@ -217,53 +242,47 @@ def post_pr_comment(comment: str) -> bool:
 
 def main():
     print("🚀 Self-Healing CI/CD Agent starting...")
-    print(f"   Repo: {REPO_NAME}")
-    print(f"   PR:   #{PR_NUMBER}")
-    print(f"   SHA:  {COMMIT_SHA[:8] if COMMIT_SHA else 'unknown'}")
+    print(f"   Repo:     {REPO_NAME}")
+    print(f"   PR:       #{PR_NUMBER}")
+    print(f"   SHA:      {COMMIT_SHA[:8] if COMMIT_SHA else 'unknown'}")
+    print(f"   Provider: {AI_PROVIDER.upper()}")
 
-    if not ANTHROPIC_API_KEY:
-        print("❌ ANTHROPIC_API_KEY not set. Exiting.")
+    if AI_PROVIDER == "claude" and not ANTHROPIC_API_KEY:
+        print("❌ AI_PROVIDER=claude but ANTHROPIC_API_KEY not set.")
+        sys.exit(1)
+    if AI_PROVIDER == "gemini" and not GEMINI_API_KEY:
+        print("❌ AI_PROVIDER=gemini but GEMINI_API_KEY not set.")
         sys.exit(1)
 
-    # 1. Read logs
     logs = read_logs()
     print(f"📄 Logs loaded ({len(logs)} characters)")
 
-    # 2. Quick heuristic classification
     failure_context = classify_failures(logs)
-    print(f"🔍 Heuristic detection: {failure_context['detected']}")
+    print(f"🔍 Detected failures: {failure_context['detected']}")
 
     if not failure_context["detected"]:
-        print("✅ No failures detected in logs. Pipeline appears healthy.")
-        # Still post a success note if it's a PR
+        print("✅ No failures detected — pipeline healthy.")
         if PR_NUMBER and PR_NUMBER != "None":
-            comment = "## 🤖 Self-Healing CI/CD Agent\n\n✅ **Pipeline analysis complete — no failures detected.** All checks passed!\n"
-            post_pr_comment(comment)
+            post_pr_comment("## 🤖 Self-Healing CI/CD Agent\n\n✅ **No failures detected.** All checks passed!\n")
         return
 
-    # 3. Claude analysis
     try:
-        analysis = analyse_with_claude(logs, failure_context)
-        print(f"🧠 Claude analysis complete. Severity: {analysis.get('severity', 'unknown')}")
+        analysis = analyse_with_ai(logs, failure_context)
+        print(f"🧠 Analysis complete. Severity: {analysis.get('severity', 'unknown')}")
     except json.JSONDecodeError as e:
-        print(f"❌ Failed to parse Claude response as JSON: {e}")
+        print(f"❌ Failed to parse AI response as JSON: {e}")
         sys.exit(1)
     except Exception as e:
-        print(f"❌ Claude API error: {e}")
+        print(f"❌ AI provider error: {e}")
         sys.exit(1)
 
-    # 4. Format comment
     comment = format_pr_comment(analysis, COMMIT_SHA, RUN_ID, REPO_NAME)
-
-    # 5. Post to PR
     post_pr_comment(comment)
 
-    # 6. Save analysis locally for debugging
     with open("agent-analysis.json", "w") as f:
         json.dump(analysis, f, indent=2)
-    print("💾 Analysis saved to agent-analysis.json")
-
-    print("✅ Self-Healing Agent completed successfully.")
+    print("💾 Saved to agent-analysis.json")
+    print("✅ Agent completed.")
 
 
 if __name__ == "__main__":
