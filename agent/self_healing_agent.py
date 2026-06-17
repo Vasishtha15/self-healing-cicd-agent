@@ -136,7 +136,7 @@ Pipeline logs:
 
 Respond in valid JSON only. No markdown, no explanation outside the JSON."""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={GEMINI_API_KEY}"
 
     payload = {
         "contents": [{"parts": [{"text": combined_prompt}]}],
@@ -166,7 +166,7 @@ def format_pr_comment(analysis: dict, commit_sha: str, run_id: str, repo: str) -
     confidence_emoji = {"high": "✅", "medium": "⚠️", "low": "❓"}.get(
         analysis.get("confidence", "medium"), "⚠️")
 
-    provider_label = "Anthropic Claude Sonnet" if AI_PROVIDER == "claude" else "Google Gemini 1.5 Flash"
+    provider_label = "Anthropic Claude Sonnet" if AI_PROVIDER == "claude" else "Google Gemini 3.5 Flash"
     provider_badge = "🟣" if AI_PROVIDER == "claude" else "🔵"
     failure_badges = " ".join([f"`{ft}`" for ft in analysis.get("failure_types", ["unknown"])])
 
