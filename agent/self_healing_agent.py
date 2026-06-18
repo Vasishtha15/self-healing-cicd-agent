@@ -78,7 +78,7 @@ def classify_failures(logs: str) -> dict:
     failures = {
         "install": any(kw in logs.lower() for kw in ["no module named", "pip", "could not find", "requirement", "install: failure"]),
         "lint":    any(kw in logs.lower() for kw in ["e1", "e2", "e3", "w1", "flake8", "pylint", "undefined name", "lint: failure"]),
-        "test":    any(kw in logs.lower() for kw in ["failed", "assertionerror", "pytest", "test_", "test: failure", "FAILED", "assert"]),
+        "test":    any(kw in logs for kw in ["FAILED", "AssertionError", "1 failed"]) or any(kw in logs.lower() for kw in ["failed", "assertionerror", "pytest", "test: failure"]),
         "docker":  any(kw in logs.lower() for kw in ["dockerfile", "docker", "build failed", "step", "runc", "docker: failure"]),
     }
     detected = [k for k, v in failures.items() if v]
