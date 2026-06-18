@@ -134,20 +134,33 @@ def analyse_with_gemini(logs: str, failure_context: dict) -> dict:
     detected_types = ", ".join(failure_context["detected"]) or "unknown"
     print(f"🤖 Sending logs to Google Gemini (detected: {detected_types})...")
 
-    combined_prompt = f"""{SYSTEM_PROMPT}
+    # Trim logs to last 3000 chars — most relevant errors are at the end
+    trimmed_logs = logs[-3000:] if len(logs) > 3000 else logs
 
-Pipeline failure detected. Failure types identified: {detected_types}
+    combined_prompt = f"""You are a DevOps expert. Analyse these CI/CD pipeline logs and respond ONLY in valid JSON.
 
-Pipeline logs:
-{logs}
+Detected failure types: {detected_types}
 
-Respond in valid JSON only. No markdown, no explanation outside the JSON."""
+Logs:
+{trimmed_logs}
 
+Respond with ONLY this JSON structure, no other text:
+{{
+  "severity": "high",
+  "failure_types": {json.dumps(detected_types)},
+  "root_cause": "one paragraph explanation",
+  "fixes": [
+    {{"type": "test", "title": "fix title", "description": "what to do", "code": "command if applicable"}}
+  ],
+  "prevention": "one sentence",
+  "confidence": "high"
+}}"""
+  
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 
     payload = {
         "contents": [{"parts": [{"text": combined_prompt}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048}
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 8192}
     }
 
     response = requests.post(url, json=payload, timeout=60)
