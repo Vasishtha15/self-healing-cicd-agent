@@ -196,7 +196,10 @@ def format_pr_comment(analysis: dict, commit_sha: str, run_id: str, repo: str) -
 
     provider_label = "Anthropic Claude Sonnet" if AI_PROVIDER == "claude" else "Google Gemini 2.5 Flash"
     provider_badge = "🟣" if AI_PROVIDER == "claude" else "🔵"
-    failure_badges = " ".join([f"`{ft}`" for ft in analysis.get("failure_types", ["unknown"])])
+    failure_types = analysis.get("failure_types", ["unknown"])
+    if isinstance(failure_types, str):
+        failure_types = [f.strip() for f in failure_types.split(",")]
+    failure_badges = " ".join([f"`{ft}`" for ft in failure_types])
 
     fixes_md = ""
     for i, fix in enumerate(analysis.get("fixes", []), 1):
