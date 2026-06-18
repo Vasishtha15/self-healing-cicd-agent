@@ -1,15 +1,18 @@
 FROM python:3.11-slim
 
+RUN adduser --disabled-password --gecos '' appuser
+
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-EXPOSE 8080
+RUN chown -R appuser:appuser /app
+USER appuser
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD python -c "import requests; requests.get('http://localhost:8080/health')" || exit 1
+EXPOSE 8080
 
 CMD ["python", "app.py"]
