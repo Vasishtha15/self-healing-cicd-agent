@@ -169,7 +169,7 @@ self-healing-cicd-agent/
 
 **Ayushi Vasishtha** — DevOps Engineer | Platform Engineering | AI-Augmented DevOps
 
-Built by Ayushi Vasishtha
+Built by [Ayushi Vasishtha](https://vasishtha15.github.io)
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=flat&logo=linkedin&logoColor=white)](https://linkedin.com/in/ayushivasishtha)
 
